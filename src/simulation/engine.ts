@@ -199,10 +199,11 @@ function buildExporterOrder(
         !runtime.blockedPartners.has(importer.country.id)
     );
   });
+  const preferredWithSupplyIds = new Set(preferredWithSupply);
 
   const remaining = runtimes
     .filter((runtime) => runtime.country.id !== importer.country.id)
-    .filter((runtime) => !preferredWithSupply.includes(runtime.country.id))
+    .filter((runtime) => !preferredWithSupplyIds.has(runtime.country.id))
     .filter((runtime) => runtime.exportSupply[resource] > 0)
     .filter((runtime) => !importer.blockedPartners.has(runtime.country.id))
     .filter((runtime) => !runtime.blockedPartners.has(importer.country.id))
@@ -549,6 +550,13 @@ function simulateStep(
         const shipped = delivered / routeEfficiency;
 
         exporter.exportSupply[key] -= shipped;
+        // Keep physical inventories in sync with the financial trade records.
+        // Shipping losses leave the world economy; only delivered goods reach the importer.
+        exporter.stockAfterConsumption[key] = Math.max(
+          0,
+          exporter.stockAfterConsumption[key] - shipped
+        );
+        importer.stockAfterConsumption[key] += delivered;
         importer.importsReceived[key] += delivered;
         exporter.exportsShipped[key] += shipped;
 
@@ -699,7 +707,9 @@ function simulateStep(
 
     for (const key of RESOURCE_KEYS) {
       const resource = country.resources[key];
-      const oldPrice = resource.price;
+      // Imported scenarios may contain a zero price (the editor historically allowed it).
+      // Use the same floor as the resulting price to avoid an infinite price-change rate.
+      const oldPrice = Math.max(resource.price, 0.5);
 
       const localShortagePressure = runtime.shortages[key] / Math.max(runtime.needs[key], 1);
       const debtPricePressure = clamp(debtPressure * 0.01, 0, 0.12);
@@ -802,7 +812,9 @@ function simulateStep(
     const rate = clamp((gap / 180) * config.migrationSensitivity, 0, 0.05);
     const migrants = Math.max(
       0,
-      Math.min(source.nextPopulation - 1, Math.round(source.nextPopulation * rate))
+      // Preserve the model's minimum population without creating people when
+      // finalPopulation is clamped later in the step.
+      Math.min(source.nextPopulation - 10, Math.round(source.nextPopulation * rate))
     );
 
     if (migrants <= 0) continue;
@@ -959,15 +971,7 @@ function simulateStep(
       totalNeed: row.totalNeed,
       totalShortage: row.totalShortage,
       averageSufficiency: row.averageSufficiency,
-      netTrade:
-        row.runtime.tradeRevenue -
-        row.effectiveImportCost -
-        row.subsidyCost -
-        row.taxPaid -
-        row.publicSpendingCost -
-        row.investmentCost -
-        row.interestPaid -
-        row.debtRepayment,
+      netTrade: row.runtime.tradeRevenue - row.effectiveImportCost,
 
       dependencyShare: row.dependencyShare,
       dependencyPartnerId: row.topPartnerEntry?.[0] ?? null,
@@ -1109,7 +1113,11 @@ export function simulateEconomy(config: SimulationConfig): SimulationResult {
   const history: WorldStepRecord[] = [];
   const rng = createRng(config.seed);
 
-  for (let step = 1; step <= config.steps; step += 1) {
+  const stepCount = Number.isFinite(config.steps)
+    ? Math.max(0, Math.floor(config.steps))
+    : 0;
+
+  for (let step = 1; step <= stepCount; step += 1) {
     const result = simulateStep(state, config, step, rng);
     history.push(result.record);
     state = result.nextState;

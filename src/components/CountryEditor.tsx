@@ -283,6 +283,7 @@ export function CountryEditor({
 
           return (
             <button
+              type="button"
               key={partner.id}
               className={`partner-chip ${active ? "active" : ""}`}
               onClick={() => onTogglePreferredPartner(partner.id)}
@@ -336,7 +337,7 @@ export function CountryEditor({
               <NumberControl
                 label="Price"
                 value={resource.price}
-                min={0}
+                min={0.5}
                 max={50}
                 step={0.1}
                 onChange={(value) => onResourceChange(key, "price", value)}

@@ -3,7 +3,11 @@ import "./styles.css";
 import { CountryEditor } from "./components/CountryEditor";
 import { NumberControl } from "./components/NumberControl";
 import { WorldTrendChart, type WorldMetric } from "./components/WorldTrendChart";
-import { createCountry, createDefaultConfig } from "./simulation/presets";
+import {
+  createCountry,
+  createDefaultConfig,
+  normalizeSimulationConfig,
+} from "./simulation/presets";
 import { simulateEconomy } from "./simulation/engine";
 import type {
   CountryState,
@@ -119,6 +123,30 @@ function createScenarioSlot(seedOffset = 0): ScenarioSlot {
   };
 }
 
+function normalizeScenarioSlot(value: unknown): ScenarioSlot | null {
+  if (typeof value !== "object" || value === null) return null;
+  const slot = value as Record<string, unknown>;
+  const config = normalizeSimulationConfig(slot.config);
+  if (!config) return null;
+
+  const requestedId = typeof slot.selectedCountryId === "string" ? slot.selectedCountryId : "";
+  const selectedCountryId = config.initialState.countries.some(
+    (country) => country.id === requestedId
+  )
+    ? requestedId
+    : config.initialState.countries[0].id;
+
+  return { config, selectedCountryId };
+}
+
+function normalizeScenarios(value: unknown): Record<ScenarioKey, ScenarioSlot> | null {
+  if (typeof value !== "object" || value === null) return null;
+  const input = value as Record<string, unknown>;
+  const scenarioA = normalizeScenarioSlot(input.A);
+  const scenarioB = normalizeScenarioSlot(input.B);
+  return scenarioA && scenarioB ? { A: scenarioA, B: scenarioB } : null;
+}
+
 function formatEventType(type: string): string {
   return type
     .replaceAll("_", " ")
@@ -181,12 +209,21 @@ function summarizeResult(result: SimulationResult | null): ScenarioSummary | nul
   const collapsedCountries = finalCountries.filter((c) => c.status === "collapsed").length;
   const stressedCountries = finalCountries.filter((c) => c.status === "stressed").length;
 
-  const topCountryByWealth =
-    [...finalCountries].sort((a, b) => b.wealth - a.wealth)[0] ?? null;
-  const worstCountryByHappiness =
-    [...finalCountries].sort((a, b) => a.happiness - b.happiness)[0] ?? null;
-  const mostDependentCountry =
-    [...finalCountries].sort((a, b) => b.dependencyShare - a.dependencyShare)[0] ?? null;
+  const topCountryByWealth = finalCountries.reduce<CountryStepRecord | null>(
+    (best, country) => (!best || country.wealth > best.wealth ? country : best),
+    null
+  );
+  const worstCountryByHappiness = finalCountries.reduce<CountryStepRecord | null>(
+    (worst, country) => (!worst || country.happiness < worst.happiness ? country : worst),
+    null
+  );
+  const mostDependentCountry = finalCountries.reduce<CountryStepRecord | null>(
+    (mostDependent, country) =>
+      !mostDependent || country.dependencyShare > mostDependent.dependencyShare
+        ? country
+        : mostDependent,
+    null
+  );
 
   return {
     population,
@@ -764,9 +801,9 @@ export default function App() {
     }
 
     try {
-      const parsed = JSON.parse(raw) as Record<ScenarioKey, ScenarioSlot>;
-      if (!parsed.A?.config || !parsed.B?.config) throw new Error("Invalid scenario file");
-      setScenarios({ A: parsed.A, B: parsed.B });
+      const parsed = normalizeScenarios(JSON.parse(raw));
+      if (!parsed) throw new Error("Invalid scenario file");
+      setScenarios(parsed);
       setActiveScenario("A");
       setSaveStatus("Loaded saved scenarios from this browser.");
     } catch {
@@ -786,6 +823,64 @@ export default function App() {
     setSaveStatus("Exported scenarios as JSON.");
   }
 
+  function exportResultsCsv() {
+    const finalStep = activeResult.history[activeResult.history.length - 1];
+    if (!finalStep) {
+      setSaveStatus("There are no simulation results to export.");
+      return;
+    }
+
+    const columns = [
+      "scenario",
+      "step",
+      "country",
+      "status",
+      "population",
+      "happiness",
+      "wealth",
+      "debt",
+      "gdp",
+      "inflation_rate",
+      "resource_sufficiency",
+      "net_trade",
+      "net_migration",
+      "warnings",
+    ];
+    const escapeCsv = (value: string | number) => {
+      const text = String(value);
+      return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    };
+    const rows = finalStep.countries.map((country) =>
+      [
+        activeScenario,
+        finalStep.step,
+        country.countryName,
+        country.status,
+        country.population,
+        country.happiness,
+        country.wealth,
+        country.debt,
+        country.gdp,
+        country.inflationRate,
+        country.averageSufficiency,
+        country.netTrade,
+        country.netMigration,
+        country.warnings.join("; "),
+      ]
+        .map(escapeCsv)
+        .join(",")
+    );
+    const csv = [columns.join(","), ...rows].join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `scenario-${activeScenario.toLowerCase()}-results.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setSaveStatus(`Exported Scenario ${activeScenario} results as CSV.`);
+  }
+
   function importScenarios(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -793,10 +888,14 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const parsed = JSON.parse(String(reader.result));
-        const next = parsed.scenarios ?? parsed;
-        if (!next.A?.config || !next.B?.config) throw new Error("Invalid scenario file");
-        setScenarios({ A: next.A, B: next.B });
+        const parsed = JSON.parse(String(reader.result)) as unknown;
+        const envelope =
+          typeof parsed === "object" && parsed !== null && "scenarios" in parsed
+            ? (parsed as { scenarios: unknown }).scenarios
+            : parsed;
+        const next = normalizeScenarios(envelope);
+        if (!next) throw new Error("Invalid scenario file");
+        setScenarios(next);
         setActiveScenario("A");
         setSaveStatus(`Imported ${file.name}.`);
       } catch {
@@ -1006,6 +1105,9 @@ export default function App() {
           </button>
           <button className="secondary" onClick={exportScenarios}>
             Export JSON
+          </button>
+          <button className="secondary" onClick={exportResultsCsv}>
+            Export results CSV
           </button>
           <button className="secondary" onClick={() => importInputRef.current?.click()}>
             Import JSON

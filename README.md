@@ -13,17 +13,20 @@ Interactive multi-country economic simulation featuring trade networks, AI-drive
 * Automated policy recommendations
 * Save/load scenarios
 * JSON import/export
+* CSV result export for external analysis
 * Interactive dashboard UI
 
 ## Screenshots
 
 ### Global Economic Dashboard
 
-![Economy Simulator Dashboard](docs/economy1.png)
+![Economy Simulator Dashboard](docs/eco1.png)
 
-![Trade Network View](docs/economy2.png)
+![Trade Network View](docs/eco2.png)
 
-![Policy Analysis](docs/economy3.png)
+![Policy Analysis](docs/eco3.png)
+
+![Scenario Comparison](docs/eco4.png)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 

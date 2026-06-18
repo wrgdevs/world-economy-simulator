@@ -58,7 +58,7 @@ export function ResourceEditor({
       <NumberControl
         label="Price"
         value={price}
-        min={0}
+        min={0.5}
         max={50}
         step={0.1}
         onChange={(value) => onChange("price", value)}

@@ -224,3 +224,147 @@ export function createDefaultConfig(): SimulationConfig {
     },
   };
 }
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function safeNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(max, Math.max(min, value))
+    : fallback;
+}
+
+/**
+ * Converts untrusted save/import data into a complete, bounded configuration.
+ * Returns null when the payload does not contain a usable country list.
+ */
+export function normalizeSimulationConfig(value: unknown): SimulationConfig | null {
+  const input = asRecord(value);
+  const initialState = asRecord(input?.initialState);
+  const rawCountries = initialState?.countries;
+  if (!Array.isArray(rawCountries) || rawCountries.length === 0) return null;
+
+  const defaults = createDefaultConfig();
+  const usedIds = new Set<string>();
+
+  const countries = rawCountries.map((rawCountry, index) => {
+    const country = asRecord(rawCountry) ?? {};
+    const resources = asRecord(country.resources) ?? {};
+    const tradePolicy = asRecord(country.tradePolicy) ?? {};
+    const policy = asRecord(country.policy) ?? {};
+    const aiPolicy = asRecord(country.aiPolicy) ?? {};
+    const laborAllocation = asRecord(country.laborAllocation) ?? {};
+
+    const requestedId =
+      typeof country.id === "string" && country.id.trim()
+        ? country.id.trim()
+        : `country-${index + 1}`;
+    let id = requestedId;
+    let suffix = 2;
+    while (usedIds.has(id)) {
+      id = `${requestedId}-${suffix}`;
+      suffix += 1;
+    }
+    usedIds.add(id);
+
+    const name =
+      typeof country.name === "string" && country.name.trim()
+        ? country.name.trim().slice(0, 80)
+        : `Country ${index + 1}`;
+    const status =
+      country.status === "stressed" || country.status === "collapsed"
+        ? country.status
+        : "active";
+
+    const resourceOverride = (key: ResourceKey): Partial<ResourceState> => {
+      const resource = asRecord(resources[key]) ?? {};
+      return {
+        amount: safeNumber(resource.amount, DEFAULT_RESOURCES[key].amount, 0, 10_000),
+        productionRate: safeNumber(
+          resource.productionRate,
+          DEFAULT_RESOURCES[key].productionRate,
+          0,
+          500
+        ),
+        consumptionRate: safeNumber(
+          resource.consumptionRate,
+          DEFAULT_RESOURCES[key].consumptionRate,
+          0,
+          200
+        ),
+        price: safeNumber(resource.price, DEFAULT_RESOURCES[key].price, 0.5, 50),
+      };
+    };
+
+    return createCountry(id, name, {
+      population: safeNumber(country.population, 1000, 10, 100_000),
+      happiness: safeNumber(country.happiness, 65, 0, 100),
+      wealth: safeNumber(country.wealth, 5000, 0, 100_000),
+      debt: safeNumber(country.debt, 0, 0, 1_000_000_000),
+      infrastructure: safeNumber(country.infrastructure, 1, 0.8, 2.8),
+      tradeOpenness: safeNumber(country.tradeOpenness, 1, 0.5, 1.5),
+      laborParticipation: safeNumber(country.laborParticipation, 0.64, 0.3, 0.92),
+      status,
+      laborAllocation: {
+        agriculture: safeNumber(laborAllocation.agriculture, 0.35, 0, 1),
+        industry: safeNumber(laborAllocation.industry, 0.35, 0, 1),
+        services: safeNumber(laborAllocation.services, 0.3, 0, 1),
+      },
+      tradePolicy: {
+        importTariff: safeNumber(tradePolicy.importTariff, 0.08, 0, 0.4),
+        tradeBarrier: safeNumber(tradePolicy.tradeBarrier, 0.1, 0, 0.4),
+        preferredPartners: Array.isArray(tradePolicy.preferredPartners)
+          ? tradePolicy.preferredPartners.filter(
+              (partner): partner is string => typeof partner === "string"
+            )
+          : [],
+      },
+      policy: {
+        incomeTaxRate: safeNumber(policy.incomeTaxRate, 0.08, 0, 0.5),
+        publicSpending: safeNumber(policy.publicSpending, 25, 0, 200),
+        productionInvestment: safeNumber(policy.productionInvestment, 18, 0, 200),
+        importSubsidyRate: safeNumber(policy.importSubsidyRate, 0.06, 0, 0.5),
+      },
+      aiPolicy: {
+        enabled: typeof aiPolicy.enabled === "boolean" ? aiPolicy.enabled : false,
+        responsiveness: safeNumber(aiPolicy.responsiveness, 0.55, 0, 1.5),
+        targetHappiness: safeNumber(aiPolicy.targetHappiness, 65, 0, 100),
+        targetDebtRatio: safeNumber(aiPolicy.targetDebtRatio, 0.8, 0, 3),
+      },
+      resources: {
+        food: resourceOverride("food"),
+        energy: resourceOverride("energy"),
+        materials: resourceOverride("materials"),
+      },
+    });
+  });
+
+  const validIds = new Set(countries.map((country) => country.id));
+  for (const country of countries) {
+    country.tradePolicy.preferredPartners = [...new Set(country.tradePolicy.preferredPartners)].filter(
+      (partnerId) => partnerId !== country.id && validIds.has(partnerId)
+    );
+  }
+
+  return {
+    steps: Math.round(safeNumber(input?.steps, defaults.steps, 1, 200)),
+    taxRate: safeNumber(input?.taxRate, defaults.taxRate, 0, 1),
+    tradeFriction: safeNumber(input?.tradeFriction, defaults.tradeFriction, 0, 0.4),
+    enableEvents:
+      typeof input?.enableEvents === "boolean" ? input.enableEvents : defaults.enableEvents,
+    eventChance: safeNumber(input?.eventChance, defaults.eventChance, 0, 0.5),
+    seed: Math.round(safeNumber(input?.seed, defaults.seed, 1, 9_999_999)),
+    migrationSensitivity: safeNumber(
+      input?.migrationSensitivity,
+      defaults.migrationSensitivity,
+      0,
+      2
+    ),
+    interestRate: safeNumber(input?.interestRate, defaults.interestRate, 0, 0.1),
+    priceFlexibility: safeNumber(input?.priceFlexibility, defaults.priceFlexibility, 0.2, 2),
+    initialState: { countries },
+  };
+}

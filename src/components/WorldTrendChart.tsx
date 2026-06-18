@@ -45,13 +45,16 @@ export function WorldTrendChart({ result, metric }: WorldTrendChartProps) {
 
     const labels = result.history.map((step) => `Step ${step.step}`);
     const countries = result.finalState.countries;
+    const recordsByStep = result.history.map(
+      (step) => new Map(step.countries.map((country) => [country.countryId, country] as const))
+    );
 
     return {
       labels,
       datasets: countries.map((country, index) => ({
         label: country.name,
-        data: result.history.map((step) => {
-          const record = step.countries.find((entry) => entry.countryId === country.id);
+        data: recordsByStep.map((records) => {
+          const record = records.get(country.id);
           return record ? metricValue(record, metric) : null;
         }),
         borderColor: palette[index % palette.length],
