@@ -364,7 +364,7 @@ function maybeAddCountryEvent(
   });
 }
 
-function applyAIPolicy(country: CountryState): void {
+function applyAutomatedPolicy(country: CountryState): void {
   if (!country.aiPolicy.enabled) return;
 
   const responsiveness = clamp(country.aiPolicy.responsiveness, 0, 1.5);
@@ -451,7 +451,7 @@ function simulateStep(
 
   for (const runtime of runtimes) {
     const country = runtime.country;
-    applyAIPolicy(country);
+    applyAutomatedPolicy(country);
 
     const allocation = normalizeAllocation(country.laborAllocation);
     const laborParticipation = clamp(country.laborParticipation ?? 0.64, 0.3, 0.92);
@@ -1054,7 +1054,7 @@ function simulateStep(
             country.id,
             country.name,
             "info",
-            "AI policy active",
+            "Policy autopilot active",
             `${country.name} is auto-adjusting its fiscal and trade settings.`
           )
         );

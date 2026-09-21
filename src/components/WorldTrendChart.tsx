@@ -9,41 +9,68 @@ import {
   Tooltip,
   Legend,
   Filler,
+  type Plugin,
 } from "chart.js";
 import type { ChartData, ChartOptions } from "chart.js";
 import type { CountryStepRecord, SimulationResult } from "../simulation/types";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Filler);
 
-export type WorldMetric = "population" | "happiness" | "wealth";
+export type WorldMetric =
+  | "population"
+  | "happiness"
+  | "wealth"
+  | "debt"
+  | "gdp"
+  | "inflation";
 
 interface WorldTrendChartProps {
   result: SimulationResult | null;
   metric: WorldMetric;
+  currentStep?: number;
 }
 
 const palette = [
-  "#38bdf8",
-  "#f97316",
-  "#a78bfa",
-  "#34d399",
-  "#facc15",
-  "#fb7185",
-  "#60a5fa",
-  "#22c55e",
+  "#38bdf8", // Sky
+  "#f59e0b", // Amber
+  "#10b981", // Emerald
+  "#ec4899", // Pink
+  "#8b5cf6", // Purple
+  "#f97316", // Orange
+  "#64748b", // Slate
 ];
 
 function metricValue(country: CountryStepRecord, metric: WorldMetric): number {
   if (metric === "population") return country.population;
   if (metric === "happiness") return country.happiness;
-  return country.wealth;
+  if (metric === "wealth") return country.wealth;
+  if (metric === "debt") return country.debt;
+  if (metric === "gdp") return country.gdp;
+  return Number((country.inflationRate * 100).toFixed(2));
 }
 
-export function WorldTrendChart({ result, metric }: WorldTrendChartProps) {
+function metricLabel(metric: WorldMetric): string {
+  switch (metric) {
+    case "population":
+      return "Population";
+    case "happiness":
+      return "Happiness (%)";
+    case "wealth":
+      return "Treasury Wealth ($)";
+    case "debt":
+      return "Total Debt ($)";
+    case "gdp":
+      return "Output GDP ($)";
+    case "inflation":
+      return "Inflation Rate (%)";
+  }
+}
+
+export function WorldTrendChart({ result, metric, currentStep }: WorldTrendChartProps) {
   const chartData = useMemo<ChartData<"line"> | null>(() => {
     if (!result || result.history.length === 0) return null;
 
-    const labels = result.history.map((step) => `Step ${step.step}`);
+    const labels = result.history.map((step) => `T+${step.step}`);
     const countries = result.finalState.countries;
     const recordsByStep = result.history.map(
       (step) => new Map(step.countries.map((country) => [country.countryId, country] as const))
@@ -59,13 +86,47 @@ export function WorldTrendChart({ result, metric }: WorldTrendChartProps) {
         }),
         borderColor: palette[index % palette.length],
         backgroundColor: palette[index % palette.length],
-        tension: 0.28,
+        tension: 0.2,
         pointRadius: 0,
-        borderWidth: 2,
+        pointHoverRadius: 4,
+        borderWidth: 1.8,
         spanGaps: true,
       })),
     };
   }, [metric, result]);
+
+  // Subtle vertical line plugin at currentStep
+  const plugins = useMemo<Plugin<"line">[]>(() => {
+    if (!currentStep) return [];
+    return [
+      {
+        id: "currentStepLine",
+        afterDraw(chart) {
+          const { ctx, chartArea, scales } = chart;
+          const xAxis = scales.x;
+          if (!xAxis) return;
+          const idx = Math.max(0, currentStep - 1);
+          const xPixel = xAxis.getPixelForTick(idx);
+          if (xPixel >= chartArea.left && xPixel <= chartArea.right) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = "rgba(56, 189, 248, 0.75)";
+            ctx.lineWidth = 1.5;
+            ctx.moveTo(xPixel, chartArea.top);
+            ctx.lineTo(xPixel, chartArea.bottom);
+            ctx.stroke();
+
+            // Small label at top
+            ctx.fillStyle = "#38bdf8";
+            ctx.font = "11px monospace";
+            ctx.fillText(`T+${currentStep}`, xPixel + 4, chartArea.top + 12);
+            ctx.restore();
+          }
+        },
+      },
+    ];
+  }, [currentStep]);
 
   const options = useMemo<ChartOptions<"line">>(
     () => ({
@@ -78,27 +139,52 @@ export function WorldTrendChart({ result, metric }: WorldTrendChartProps) {
       plugins: {
         legend: {
           position: "top",
+          align: "end",
           labels: {
-            color: "#e5e7eb",
+            color: "#94a3b8",
+            boxWidth: 12,
+            boxHeight: 12,
+            usePointStyle: true,
+            pointStyle: "circle",
+            font: {
+              family: "system-ui, sans-serif",
+              size: 11.5,
+            },
           },
         },
         tooltip: {
           mode: "index",
           intersect: false,
+          backgroundColor: "#0f172a",
+          borderColor: "#334155",
+          borderWidth: 1,
+          titleColor: "#f1f5f9",
+          bodyColor: "#cbd5e1",
+          bodyFont: { family: "monospace", size: 11.5 },
+          titleFont: { size: 12, weight: "bold" },
+          padding: 8,
         },
       },
       scales: {
         x: {
-          ticks: { color: "#94a3b8" },
-          grid: { color: "rgba(148, 163, 184, 0.12)" },
+          ticks: {
+            color: "#64748b",
+            font: { family: "monospace", size: 11 },
+            maxTicksLimit: 12,
+          },
+          grid: { color: "rgba(30, 41, 59, 0.5)" },
         },
         y: {
-          ticks: { color: "#94a3b8" },
-          grid: { color: "rgba(148, 163, 184, 0.12)" },
+          ticks: {
+            color: "#64748b",
+            font: { family: "monospace", size: 11 },
+          },
+          grid: { color: "rgba(30, 41, 59, 0.5)" },
           title: {
             display: true,
-            text: metric === "population" ? "Population" : metric === "happiness" ? "Happiness" : "Wealth",
-            color: "#cbd5e1",
+            text: metricLabel(metric),
+            color: "#94a3b8",
+            font: { size: 11.5, family: "system-ui, sans-serif" },
           },
         },
       },
@@ -108,19 +194,15 @@ export function WorldTrendChart({ result, metric }: WorldTrendChartProps) {
 
   if (!chartData) {
     return (
-      <div className="card chart-card large">
-        <h2>World trends</h2>
-        <p className="muted">Run the simulation to see country comparisons.</p>
+      <div className="chart-empty-state">
+        <span>No historical data available. Run the simulation.</span>
       </div>
     );
   }
 
   return (
-    <div className="card chart-card large">
-      <h2>World trends</h2>
-      <div className="chart-panel">
-        <Line data={chartData} options={options} />
-      </div>
+    <div className="chart-canvas-wrap">
+      <Line data={chartData} options={options} plugins={plugins} />
     </div>
   );
 }

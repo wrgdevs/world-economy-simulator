@@ -26,24 +26,22 @@ export function NumberControl({
     <div className="control">
       <div className="control-top">
         <label>{label}</label>
-        <span className="control-value">
-          {value}
-          {suffix ?? ""}
-        </span>
+        <div className="control-input-wrap">
+          <input
+            className="control-number"
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={(e) => onChange(clampInput(Number(e.target.value), min, max))}
+          />
+          {suffix && <span className="control-suffix">{suffix}</span>}
+        </div>
       </div>
 
       <input
         type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(clampInput(Number(e.target.value), min, max))}
-      />
-
-      <input
-        className="control-number"
-        type="number"
         min={min}
         max={max}
         step={step}

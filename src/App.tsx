@@ -1,8 +1,12 @@
-import { type ChangeEvent, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import "./styles.css";
-import { CountryEditor } from "./components/CountryEditor";
+import { GlobalTelemetry } from "./components/GlobalTelemetry";
+import { WorldNetworkView } from "./components/WorldNetworkView";
+import { TimelineBar } from "./components/TimelineBar";
+import { CountryPanel, type CountryTabKey } from "./components/CountryPanel";
+import { TrendsView } from "./components/TrendsView";
+import { CompareView } from "./components/CompareView";
 import { NumberControl } from "./components/NumberControl";
-import { WorldTrendChart, type WorldMetric } from "./components/WorldTrendChart";
 import {
   createCountry,
   createDefaultConfig,
@@ -12,6 +16,7 @@ import { simulateEconomy } from "./simulation/engine";
 import type {
   CountryState,
   CountryStepRecord,
+  EventRecord,
   ResourceKey,
   SectorKey,
   SimulationConfig,
@@ -19,7 +24,14 @@ import type {
 } from "./simulation/types";
 
 type ScenarioKey = "A" | "B";
-type PolicyPresetKey = "balanced" | "freeTrade" | "protectionist" | "austerity" | "stimulus" | "crisis";
+type ViewMode = "world" | "trends" | "compare";
+type PolicyPresetKey =
+  | "balanced"
+  | "freeTrade"
+  | "protectionist"
+  | "austerity"
+  | "stimulus"
+  | "crisis";
 
 interface ScenarioSlot {
   config: SimulationConfig;
@@ -51,16 +63,17 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function money(value: number): string {
-  return `$${value.toFixed(2)}`;
+  const abs = Math.abs(value);
+  const formatted = abs.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${value < 0 ? "-" : ""}$${formatted}`;
 }
 
 function pct(value: number): string {
-  return `${(value * 100).toFixed(0)}%`;
-}
-
-function signedNumber(value: number, format: (n: number) => string): string {
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${format(value)}`;
+  const rounded = Math.abs(value) < 0.0005 ? 0 : value;
+  return `${(rounded * 100).toFixed(1)}%`;
 }
 
 function cloneCountry(country: CountryState, id: string, name: string): CountryState {
@@ -145,12 +158,6 @@ function normalizeScenarios(value: unknown): Record<ScenarioKey, ScenarioSlot> |
   const scenarioA = normalizeScenarioSlot(input.A);
   const scenarioB = normalizeScenarioSlot(input.B);
   return scenarioA && scenarioB ? { A: scenarioA, B: scenarioB } : null;
-}
-
-function formatEventType(type: string): string {
-  return type
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function normalizeSectorAllocation(allocation: {
@@ -280,26 +287,42 @@ function buildPolicySuggestions(summary: ScenarioSummary | null): string[] {
   const suggestions: string[] = [];
 
   if (summary.averageInflation > 0.08) {
-    suggestions.push("Inflation is high. Try lower subsidies, lower event volatility, or stronger production investment.");
+    suggestions.push(
+      "Inflation is elevated. Curtail excess import subsidies or expand production investment."
+    );
   }
   if (summary.debt > summary.wealth * 0.9) {
-    suggestions.push("Debt is heavy relative to wealth. Reduce spending or use a lower target debt ratio for AI policy.");
+    suggestions.push(
+      "Debt exceeds 90% of aggregate wealth. Restrain public spending or lower target debt ratios."
+    );
   }
   if (summary.happiness < 55) {
-    suggestions.push("Happiness is weak. Increase public spending, improve resource sufficiency, or reduce trade barriers.");
+    suggestions.push(
+      "Happiness is depressed. Increase public spending, ease trade barriers, and address resource shortages."
+    );
   }
   if (summary.tradeVolume < summary.population * 0.55) {
-    suggestions.push("Trade volume is low. Lower friction, tariffs, or country-level barriers to make networks more active.");
+    suggestions.push(
+      "Trade volume is stagnant. Lower trade friction and bilateral tariffs to stimulate reciprocal commerce."
+    );
   }
   if (summary.collapsedCountries > 0 || summary.stressedCountries > 0) {
-    suggestions.push("Some countries are stressed or collapsed. Check resource shortages and excessive dependency on one partner.");
+    suggestions.push(
+      "Economic distress detected. Check critical resource deficits and over-reliance on single trade partners."
+    );
   }
   if (summary.mostDependentCountry && summary.mostDependentCountry.dependencyShare > 0.45) {
-    suggestions.push(`${summary.mostDependentCountry.countryName} is highly dependent on ${summary.mostDependentCountry.dependencyPartnerName ?? "one partner"}. Add more preferred partners or boost domestic production.`);
+    suggestions.push(
+      `${summary.mostDependentCountry.countryName} is heavily dependent on ${
+        summary.mostDependentCountry.dependencyPartnerName ?? "one partner"
+      }. Diversify trade partners or reinforce domestic capacity.`
+    );
   }
 
   if (suggestions.length === 0) {
-    suggestions.push("This scenario looks stable. Try a crisis preset or higher event chance to stress-test it.");
+    suggestions.push(
+      "The world economic system is stable and balanced. Stress-test it with a Crisis preset or elevated event probability."
+    );
   }
 
   return suggestions;
@@ -312,25 +335,34 @@ function scenarioStatus(score: number): string {
   return "Stressed";
 }
 
-function deltaClass(value: number): string {
-  return value > 0 ? "delta up" : value < 0 ? "delta down" : "delta neutral";
-}
-
 export default function App() {
+  const initialParams = useMemo(() => {
+    if (typeof window === "undefined") return { view: "world" as ViewMode, step: 40, scenario: "A" as ScenarioKey, tab: "policy" as CountryTabKey };
+    const params = new URLSearchParams(window.location.search);
+    const view = (params.get("view") as ViewMode) || "world";
+    const step = params.has("step") ? Number(params.get("step")) : 40;
+    const scenario = (params.get("scenario") as ScenarioKey) || "A";
+    const tab = (params.get("tab") as CountryTabKey) || "policy";
+    return { view, step, scenario, tab };
+  }, []);
+
   const [scenarios, setScenarios] = useState<Record<ScenarioKey, ScenarioSlot>>(() => ({
     A: createScenarioSlot(0),
     B: createScenarioSlot(1337),
   }));
-  const [activeScenario, setActiveScenario] = useState<ScenarioKey>("A");
-  const [metric, setMetric] = useState<WorldMetric>("population");
-  const [countrySearch, setCountrySearch] = useState("");
-  const [saveStatus, setSaveStatus] = useState("");
+  const [activeScenario, setActiveScenario] = useState<ScenarioKey>(initialParams.scenario);
+  const [viewMode, setViewMode] = useState<ViewMode>(initialParams.view);
+  const [currentStep, setCurrentStep] = useState<number>(initialParams.step);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [saveStatus, setSaveStatus] = useState<string>("");
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState<boolean>(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSlot = scenarios[activeScenario];
   const otherScenario: ScenarioKey = activeScenario === "A" ? "B" : "A";
   const activeConfig = activeSlot.config;
 
+  // Run deterministic simulations for both slots
   const results = useMemo(
     () => ({
       A: simulateEconomy(scenarios.A.config),
@@ -339,17 +371,58 @@ export default function App() {
     [scenarios.A.config, scenarios.B.config]
   );
 
+  const activeResult = results[activeScenario];
   const summaryA = useMemo(() => summarizeResult(results.A), [results.A]);
   const summaryB = useMemo(() => summarizeResult(results.B), [results.B]);
 
-  const activeResult = results[activeScenario];
   const activeSummary = activeScenario === "A" ? summaryA : summaryB;
-  const comparisonSummary = activeScenario === "A" ? summaryB : summaryA;
-
   const activeScore = activeSummary ? computeScenarioScore(activeSummary) : 0;
-  const activeStatus = activeSummary ? scenarioStatus(activeScore) : "—";
-  const policySuggestions = useMemo(() => buildPolicySuggestions(activeSummary), [activeSummary]);
+  const activeStatus = activeSummary ? scenarioStatus(activeScore) : "--";
+  const policySuggestions = useMemo(
+    () => buildPolicySuggestions(activeSummary),
+    [activeSummary]
+  );
 
+  // Keep currentStep bounded
+  const totalSteps = activeConfig.steps;
+  const boundedStep = Math.max(1, Math.min(totalSteps, currentStep));
+
+  // Current active step record
+  const currentStepRecord = useMemo(() => {
+    if (!activeResult || activeResult.history.length === 0) return null;
+    return activeResult.history[boundedStep - 1] ?? null;
+  }, [activeResult, boundedStep]);
+
+  // Map of events by step for timeline pins
+  const eventsByStep = useMemo(() => {
+    const map = new Map<number, EventRecord[]>();
+    if (!activeResult) return map;
+    for (const stepRec of activeResult.history) {
+      if (stepRec.events.length > 0) {
+        map.set(stepRec.step, stepRec.events);
+      }
+    }
+    return map;
+  }, [activeResult]);
+
+  // Playback timer
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const interval = setInterval(() => {
+      setCurrentStep((prev) => {
+        if (prev >= totalSteps) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, 280);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, totalSteps]);
+
+  // Selected Country
   const selectedCountry = useMemo(() => {
     const fallbackId = activeConfig.initialState.countries[0]?.id ?? "";
     const effectiveId = activeConfig.initialState.countries.some(
@@ -364,41 +437,13 @@ export default function App() {
     );
   }, [activeConfig.initialState.countries, activeSlot.selectedCountryId]);
 
-  const effectiveSelectedCountryId = selectedCountry?.id ?? "";
+  // Selected Country Step Record
+  const selectedCountryStepRecord = useMemo(() => {
+    if (!currentStepRecord || !selectedCountry) return undefined;
+    return currentStepRecord.countries.find((c) => c.countryId === selectedCountry.id);
+  }, [currentStepRecord, selectedCountry]);
 
-  const visibleCountries = useMemo(() => {
-    const query = countrySearch.trim().toLowerCase();
-    const countries = activeConfig.initialState.countries;
-
-    if (!query) return countries;
-
-    return countries.filter(
-      (country) =>
-        country.name.toLowerCase().includes(query) ||
-        country.id.toLowerCase().includes(query)
-    );
-  }, [activeConfig.initialState.countries, countrySearch]);
-
-  const countryStatusById = useMemo(() => {
-    const activeFinalCountries = activeSummary?.finalCountries ?? [];
-    return new Map(activeFinalCountries.map((country) => [country.countryId, country.status] as const));
-  }, [activeSummary]);
-
-  const topRoutes = useMemo(() => {
-    const routes = activeResult.history[activeResult.history.length - 1]?.routes ?? [];
-    return [...routes].sort((a, b) => b.delivered - a.delivered).slice(0, 10);
-  }, [activeResult]);
-
-  const recentEvents = useMemo(() => {
-    const events = activeResult.history.flatMap((step) => step.events);
-    return events.slice(-10);
-  }, [activeResult]);
-
-  const recentInsights = useMemo(() => {
-    const insights = activeResult.history.flatMap((step) => step.insights);
-    return insights.slice(-12);
-  }, [activeResult]);
-
+  // Comparison Rows
   const countryComparisonRows = useMemo(() => {
     const aRows = summaryA?.finalCountries ?? [];
     const bMap = new Map((summaryB?.finalCountries ?? []).map((row) => [row.countryId, row]));
@@ -432,67 +477,68 @@ export default function App() {
 
   const comparisonRows = [
     {
-      label: "World population",
+      label: "World Population",
       a: summaryA?.population ?? 0,
       b: summaryB?.population ?? 0,
       format: (n: number) => Math.round(n).toLocaleString(),
     },
     {
-      label: "Average happiness",
-      a: summaryA?.happiness ?? 0,
-      b: summaryB?.happiness ?? 0,
-      format: (n: number) => n.toFixed(1),
-    },
-    {
-      label: "World wealth",
+      label: "World Wealth",
       a: summaryA?.wealth ?? 0,
       b: summaryB?.wealth ?? 0,
       format: money,
     },
     {
-      label: "Total debt",
+      label: "Total Debt",
       a: summaryA?.debt ?? 0,
       b: summaryB?.debt ?? 0,
       format: money,
     },
     {
-      label: "Average inflation",
+      label: "Average Happiness",
+      a: summaryA?.happiness ?? 0,
+      b: summaryB?.happiness ?? 0,
+      format: (n: number) => `${n.toFixed(1)}%`,
+    },
+    {
+      label: "Average Inflation",
       a: summaryA?.averageInflation ?? 0,
       b: summaryB?.averageInflation ?? 0,
       format: pct,
     },
     {
-      label: "Average infrastructure",
+      label: "Average Infrastructure",
       a: summaryA?.infrastructure ?? 0,
       b: summaryB?.infrastructure ?? 0,
       format: (n: number) => n.toFixed(2),
     },
     {
-      label: "Trade volume",
+      label: "Trade Volume",
       a: summaryA?.tradeVolume ?? 0,
       b: summaryB?.tradeVolume ?? 0,
       format: (n: number) => n.toFixed(1),
     },
     {
-      label: "Migration flow",
+      label: "Net Migration Flow",
       a: summaryA?.migrationFlow ?? 0,
       b: summaryB?.migrationFlow ?? 0,
       format: (n: number) => Math.round(n).toLocaleString(),
     },
     {
-      label: "Collapsed countries",
+      label: "Collapsed Economies",
       a: summaryA?.collapsedCountries ?? 0,
       b: summaryB?.collapsedCountries ?? 0,
       format: (n: number) => Math.round(n).toString(),
     },
     {
-      label: "Events",
+      label: "Recorded Shocks",
       a: summaryA?.eventCount ?? 0,
       b: summaryB?.eventCount ?? 0,
       format: (n: number) => Math.round(n).toString(),
     },
   ];
 
+  // Updaters
   function updateScenarioConfig(
     key: ScenarioKey,
     updater: (prev: SimulationConfig) => SimulationConfig
@@ -506,11 +552,11 @@ export default function App() {
     }));
   }
 
-  function updateSelectedCountryId(key: ScenarioKey, id: string) {
+  function updateSelectedCountryId(id: string) {
     setScenarios((prev) => ({
       ...prev,
-      [key]: {
-        ...prev[key],
+      [activeScenario]: {
+        ...prev[activeScenario],
         selectedCountryId: id,
       },
     }));
@@ -751,17 +797,171 @@ export default function App() {
     }));
   }
 
-  function randomizeActiveSeed() {
-    updateActiveWorldNumberField("seed", Math.floor(Math.random() * 1_000_000));
+  function addCountry() {
+    const id = crypto.randomUUID();
+    const nextCountry = createCountry(
+      id,
+      `Country ${activeConfig.initialState.countries.length + 1}`
+    );
+
+    updateScenarioConfig(activeScenario, (prev) => ({
+      ...prev,
+      initialState: {
+        ...prev.initialState,
+        countries: [...prev.initialState.countries, nextCountry],
+      },
+    }));
+
+    updateSelectedCountryId(id);
   }
 
-  function resetBoth() {
-    setScenarios({
-      A: createScenarioSlot(0),
-      B: createScenarioSlot(1337),
+  function duplicateSelectedCountry() {
+    if (!selectedCountry) return;
+
+    const id = crypto.randomUUID();
+    const copy = cloneCountry(selectedCountry, id, `${selectedCountry.name} Copy`);
+
+    updateScenarioConfig(activeScenario, (prev) => ({
+      ...prev,
+      initialState: {
+        ...prev.initialState,
+        countries: [...prev.initialState.countries, copy],
+      },
+    }));
+
+    updateSelectedCountryId(id);
+  }
+
+  function removeSelectedCountry() {
+    if (!selectedCountry || activeConfig.initialState.countries.length <= 1) return;
+
+    const index = activeConfig.initialState.countries.findIndex(
+      (country) => country.id === selectedCountry.id
+    );
+
+    const removedId = selectedCountry.id;
+
+    const remaining = activeConfig.initialState.countries
+      .filter((country) => country.id !== removedId)
+      .map((country) => ({
+        ...country,
+        tradePolicy: {
+          ...country.tradePolicy,
+          preferredPartners: country.tradePolicy.preferredPartners.filter(
+            (id) => id !== removedId
+          ),
+        },
+      }));
+
+    updateScenarioConfig(activeScenario, (prev) => ({
+      ...prev,
+      initialState: {
+        ...prev.initialState,
+        countries: remaining,
+      },
+    }));
+
+    const nextSelected = remaining[index] ?? remaining[index - 1] ?? remaining[0];
+    if (nextSelected) updateSelectedCountryId(nextSelected.id);
+  }
+
+  function applyPolicyPreset(preset: PolicyPresetKey) {
+    updateScenarioConfig(activeScenario, (prev) => {
+      const countryPolicy = {
+        balanced: {
+          incomeTaxRate: 0.08,
+          publicSpending: 28,
+          productionInvestment: 20,
+          importSubsidyRate: 0.06,
+          importTariff: 0.08,
+          tradeBarrier: 0.1,
+        },
+        freeTrade: {
+          incomeTaxRate: 0.07,
+          publicSpending: 26,
+          productionInvestment: 22,
+          importSubsidyRate: 0.09,
+          importTariff: 0.02,
+          tradeBarrier: 0.03,
+        },
+        protectionist: {
+          incomeTaxRate: 0.11,
+          publicSpending: 24,
+          productionInvestment: 28,
+          importSubsidyRate: 0.02,
+          importTariff: 0.22,
+          tradeBarrier: 0.24,
+        },
+        austerity: {
+          incomeTaxRate: 0.14,
+          publicSpending: 16,
+          productionInvestment: 14,
+          importSubsidyRate: 0.01,
+          importTariff: 0.09,
+          tradeBarrier: 0.12,
+        },
+        stimulus: {
+          incomeTaxRate: 0.05,
+          publicSpending: 42,
+          productionInvestment: 34,
+          importSubsidyRate: 0.12,
+          importTariff: 0.04,
+          tradeBarrier: 0.06,
+        },
+        crisis: {
+          incomeTaxRate: 0.1,
+          publicSpending: 18,
+          productionInvestment: 10,
+          importSubsidyRate: 0.01,
+          importTariff: 0.2,
+          tradeBarrier: 0.3,
+        },
+      }[preset];
+
+      return {
+        ...prev,
+        eventChance: preset === "crisis" ? 0.42 : prev.eventChance,
+        tradeFriction:
+          preset === "freeTrade"
+            ? 0.04
+            : preset === "crisis"
+            ? 0.28
+            : prev.tradeFriction,
+        priceFlexibility: preset === "crisis" ? 1.6 : prev.priceFlexibility,
+        initialState: {
+          ...prev.initialState,
+          countries: prev.initialState.countries.map((country) => ({
+            ...country,
+            happiness:
+              preset === "crisis"
+                ? clamp(country.happiness - 8, 0, 100)
+                : country.happiness,
+            infrastructure:
+              preset === "crisis"
+                ? clamp(country.infrastructure * 0.86, 0.1, 5)
+                : country.infrastructure,
+            policy: {
+              ...country.policy,
+              incomeTaxRate: countryPolicy.incomeTaxRate,
+              publicSpending: countryPolicy.publicSpending,
+              productionInvestment: countryPolicy.productionInvestment,
+              importSubsidyRate: countryPolicy.importSubsidyRate,
+            },
+            tradePolicy: {
+              ...country.tradePolicy,
+              importTariff: countryPolicy.importTariff,
+              tradeBarrier: countryPolicy.tradeBarrier,
+            },
+          })),
+        },
+      };
     });
-    setActiveScenario("A");
-    setCountrySearch("");
+    setSaveStatus(`Applied ${preset} preset.`);
+    setTimeout(() => setSaveStatus(""), 4000);
+  }
+
+  function randomizeActiveSeed() {
+    updateActiveWorldNumberField("seed", Math.floor(Math.random() * 1_000_000));
   }
 
   function copyScenario(source: ScenarioKey, target: ScenarioKey) {
@@ -773,6 +973,8 @@ export default function App() {
         selectedCountryId: sourceSlot.selectedCountryId,
       },
     }));
+    setSaveStatus(`Cloned Scenario ${source} to Scenario ${target}.`);
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function swapScenarios() {
@@ -786,33 +988,42 @@ export default function App() {
         selectedCountryId: prev.A.selectedCountryId,
       },
     }));
+    setSaveStatus("Swapped Scenario A and B.");
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function saveToBrowser() {
     localStorage.setItem("world-economy-simulator-scenarios", JSON.stringify(scenarios));
-    setSaveStatus("Saved current scenarios to this browser.");
+    setSaveStatus("Saved scenarios to browser.");
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function loadFromBrowser() {
     const raw = localStorage.getItem("world-economy-simulator-scenarios");
     if (!raw) {
-      setSaveStatus("No saved scenario found in this browser.");
+      setSaveStatus("No saved scenarios found.");
+      setTimeout(() => setSaveStatus(""), 4000);
       return;
     }
 
     try {
       const parsed = normalizeScenarios(JSON.parse(raw));
-      if (!parsed) throw new Error("Invalid scenario file");
+      if (!parsed) throw new Error("Invalid format");
       setScenarios(parsed);
       setActiveScenario("A");
-      setSaveStatus("Loaded saved scenarios from this browser.");
+      setSaveStatus("Loaded saved scenarios.");
     } catch {
-      setSaveStatus("Saved scenario data could not be loaded.");
+      setSaveStatus("Failed to load scenarios.");
     }
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function exportScenarios() {
-    const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), scenarios }, null, 2);
+    const payload = JSON.stringify(
+      { version: 1, exportedAt: new Date().toISOString(), scenarios },
+      null,
+      2
+    );
     const blob = new Blob([payload], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -820,13 +1031,14 @@ export default function App() {
     link.download = "world-economy-scenarios.json";
     link.click();
     URL.revokeObjectURL(url);
-    setSaveStatus("Exported scenarios as JSON.");
+    setSaveStatus("Exported scenario JSON.");
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function exportResultsCsv() {
     const finalStep = activeResult.history[activeResult.history.length - 1];
     if (!finalStep) {
-      setSaveStatus("There are no simulation results to export.");
+      setSaveStatus("No results to export.");
       return;
     }
 
@@ -878,7 +1090,8 @@ export default function App() {
     link.download = `scenario-${activeScenario.toLowerCase()}-results.csv`;
     link.click();
     URL.revokeObjectURL(url);
-    setSaveStatus(`Exported Scenario ${activeScenario} results as CSV.`);
+    setSaveStatus(`Exported Scenario ${activeScenario} CSV.`);
+    setTimeout(() => setSaveStatus(""), 4000);
   }
 
   function importScenarios(event: ChangeEvent<HTMLInputElement>) {
@@ -894,793 +1107,385 @@ export default function App() {
             ? (parsed as { scenarios: unknown }).scenarios
             : parsed;
         const next = normalizeScenarios(envelope);
-        if (!next) throw new Error("Invalid scenario file");
+        if (!next) throw new Error("Invalid format");
         setScenarios(next);
         setActiveScenario("A");
         setSaveStatus(`Imported ${file.name}.`);
       } catch {
-        setSaveStatus("Import failed. Choose a scenario JSON exported by this app.");
+        setSaveStatus("Import failed: invalid JSON file.");
       } finally {
         event.target.value = "";
+        setTimeout(() => setSaveStatus(""), 4000);
       }
     };
     reader.readAsText(file);
   }
 
-  function applyPolicyPreset(preset: PolicyPresetKey) {
-    updateScenarioConfig(activeScenario, (prev) => {
-      const countryPolicy = {
-        balanced: { incomeTaxRate: 0.08, publicSpending: 28, productionInvestment: 20, importSubsidyRate: 0.06, importTariff: 0.08, tradeBarrier: 0.1 },
-        freeTrade: { incomeTaxRate: 0.07, publicSpending: 26, productionInvestment: 22, importSubsidyRate: 0.09, importTariff: 0.02, tradeBarrier: 0.03 },
-        protectionist: { incomeTaxRate: 0.11, publicSpending: 24, productionInvestment: 28, importSubsidyRate: 0.02, importTariff: 0.22, tradeBarrier: 0.24 },
-        austerity: { incomeTaxRate: 0.14, publicSpending: 16, productionInvestment: 14, importSubsidyRate: 0.01, importTariff: 0.09, tradeBarrier: 0.12 },
-        stimulus: { incomeTaxRate: 0.05, publicSpending: 42, productionInvestment: 34, importSubsidyRate: 0.12, importTariff: 0.04, tradeBarrier: 0.06 },
-        crisis: { incomeTaxRate: 0.1, publicSpending: 18, productionInvestment: 10, importSubsidyRate: 0.01, importTariff: 0.2, tradeBarrier: 0.3 },
-      }[preset];
-
-      return {
-        ...prev,
-        eventChance: preset === "crisis" ? 0.42 : prev.eventChance,
-        tradeFriction: preset === "freeTrade" ? 0.04 : preset === "crisis" ? 0.28 : prev.tradeFriction,
-        priceFlexibility: preset === "crisis" ? 1.6 : prev.priceFlexibility,
-        initialState: {
-          ...prev.initialState,
-          countries: prev.initialState.countries.map((country) => ({
-            ...country,
-            happiness: preset === "crisis" ? clamp(country.happiness - 8, 0, 100) : country.happiness,
-            infrastructure: preset === "crisis" ? clamp(country.infrastructure * 0.86, 0.1, 5) : country.infrastructure,
-            policy: {
-              ...country.policy,
-              incomeTaxRate: countryPolicy.incomeTaxRate,
-              publicSpending: countryPolicy.publicSpending,
-              productionInvestment: countryPolicy.productionInvestment,
-              importSubsidyRate: countryPolicy.importSubsidyRate,
-            },
-            tradePolicy: {
-              ...country.tradePolicy,
-              importTariff: countryPolicy.importTariff,
-              tradeBarrier: countryPolicy.tradeBarrier,
-            },
-          })),
-        },
-      };
-    });
-    setSaveStatus(`Applied ${preset} policy preset to Scenario ${activeScenario}.`);
-  }
-
-  function addCountry() {
-    const id = crypto.randomUUID();
-    const nextCountry = createCountry(id, `Country ${activeConfig.initialState.countries.length + 1}`);
-
-    updateScenarioConfig(activeScenario, (prev) => ({
-      ...prev,
-      initialState: {
-        ...prev.initialState,
-        countries: [...prev.initialState.countries, nextCountry],
-      },
-    }));
-
-    updateSelectedCountryId(activeScenario, id);
-  }
-
-  function duplicateSelectedCountry() {
-    if (!selectedCountry) return;
-
-    const id = crypto.randomUUID();
-    const copy = cloneCountry(selectedCountry, id, `${selectedCountry.name} Copy`);
-
-    updateScenarioConfig(activeScenario, (prev) => ({
-      ...prev,
-      initialState: {
-        ...prev.initialState,
-        countries: [...prev.initialState.countries, copy],
-      },
-    }));
-
-    updateSelectedCountryId(activeScenario, id);
-  }
-
-  function removeSelectedCountry() {
-    if (!selectedCountry || activeConfig.initialState.countries.length <= 1) return;
-
-    const index = activeConfig.initialState.countries.findIndex(
-      (country) => country.id === selectedCountry.id
-    );
-
-    const removedId = selectedCountry.id;
-
-    const remaining = activeConfig.initialState.countries
-      .filter((country) => country.id !== removedId)
-      .map((country) => ({
-        ...country,
-        tradePolicy: {
-          ...country.tradePolicy,
-          preferredPartners: country.tradePolicy.preferredPartners.filter((id) => id !== removedId),
-        },
-      }));
-
-    updateScenarioConfig(activeScenario, (prev) => ({
-      ...prev,
-      initialState: {
-        ...prev.initialState,
-        countries: remaining,
-      },
-    }));
-
-    const nextSelected = remaining[index] ?? remaining[index - 1] ?? remaining[0];
-    if (nextSelected) updateSelectedCountryId(activeScenario, nextSelected.id);
-  }
-
-  const activeSummaryCards = activeSummary
-    ? [
-        {
-          label: "Stability",
-          value: activeStatus,
-          detail: `${activeScore.toFixed(0)} / 100`,
-        },
-        {
-          label: "Top wealth",
-          value: activeSummary.topCountryByWealth?.countryName ?? "—",
-          detail: activeSummary.topCountryByWealth ? money(activeSummary.topCountryByWealth.wealth) : "—",
-        },
-        {
-          label: "Lowest happiness",
-          value: activeSummary.worstCountryByHappiness?.countryName ?? "—",
-          detail: activeSummary.worstCountryByHappiness
-            ? activeSummary.worstCountryByHappiness.happiness.toFixed(1)
-            : "—",
-        },
-        {
-          label: "Most dependent",
-          value: activeSummary.mostDependentCountry?.countryName ?? "—",
-          detail: activeSummary.mostDependentCountry
-            ? `${activeSummary.mostDependentCountry.dependencyPartnerName ?? "—"} (${pct(
-                activeSummary.mostDependentCountry.dependencyShare
-              )})`
-            : "—",
-        },
-      ]
-    : [];
-
-  const selectedRuntimeStatus = selectedCountry
-    ? countryStatusById.get(selectedCountry.id) ?? "active"
-    : undefined;
-
   return (
-    <div className="app-shell">
-      <header className="hero card hero-card">
-        <div className="hero-copy">
-          <span className="eyebrow">Macroeconomic command center</span>
-          <h1><span className="gradient-text">Game Economy</span> Simulator</h1>
-          <p className="muted">
-            A world-scale economy sandbox with trade, policy, shocks, debt, migration, AI policy, and scenario comparison.
-          </p>
-          {activeSummary && (
-            <div className="hero-metrics">
-              <div className="score-orb" aria-label={`Scenario score ${activeScore.toFixed(0)} out of 100`}>
-                <strong>{activeScore.toFixed(0)}</strong>
-                <span>/100</span>
-              </div>
-              <div className="status-strip">
-                <span className="status-chip">Scenario {activeScenario}</span>
-                <span className="status-chip">{activeStatus}</span>
-                <span className="status-chip">{activeSummary.finalCountries.length} countries</span>
-                <span className="status-chip">{activeSummary.eventCount} events</span>
-              </div>
-            </div>
-          )}
+    <div className="sim-app">
+      {/* Top Application Header */}
+      <header className="app-header">
+        <div className="header-brand">
+          <svg
+            className="brand-icon-svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+          </svg>
+          <span className="brand-title">World Economy Simulator</span>
+          <span className="brand-seed" title="Deterministic simulation seed">
+            Seed #{activeConfig.seed}
+          </span>
         </div>
 
-        <div className="hero-actions">
+        {/* Primary View Switcher */}
+        <nav className="header-nav">
           <button
-            onClick={() => setActiveScenario("A")}
-            className={activeScenario === "A" ? "secondary active" : "secondary"}
+            type="button"
+            className={`nav-btn ${viewMode === "world" ? "active" : ""}`}
+            onClick={() => setViewMode("world")}
           >
-            Edit Scenario A
+            World
           </button>
           <button
-            onClick={() => setActiveScenario("B")}
-            className={activeScenario === "B" ? "secondary active" : "secondary"}
+            type="button"
+            className={`nav-btn ${viewMode === "trends" ? "active" : ""}`}
+            onClick={() => setViewMode("trends")}
           >
-            Edit Scenario B
+            Trends
           </button>
+          <button
+            type="button"
+            className={`nav-btn ${viewMode === "compare" ? "active" : ""}`}
+            onClick={() => setViewMode("compare")}
+          >
+            Compare
+          </button>
+        </nav>
 
-          <button onClick={() => copyScenario(activeScenario, otherScenario)}>
-            Copy to other
+        {/* Scenario Toggle & Settings Trigger */}
+        <div className="header-scenario-switch">
+          <div className="scenario-pill-group">
+            <button
+              type="button"
+              className={`sc-pill ${activeScenario === "A" ? "active" : ""}`}
+              onClick={() => setActiveScenario("A")}
+            >
+              Scenario A
+            </button>
+            <button
+              type="button"
+              className={`sc-pill ${activeScenario === "B" ? "active" : ""}`}
+              onClick={() => setActiveScenario("B")}
+            >
+              Scenario B
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className={`btn-settings-toggle ${showSettingsDrawer ? "active" : ""}`}
+            onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
+            title="Toggle Global Settings & Presets"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            <span>Settings</span>
           </button>
-          <button className="secondary" onClick={swapScenarios}>
-            Swap scenarios
-          </button>
-          <button className="secondary" onClick={randomizeActiveSeed}>
-            Randomize seed
-          </button>
-          <button className="secondary" onClick={resetBoth}>
-            Reset both
-          </button>
-          <button className="secondary" onClick={saveToBrowser}>
-            Save
-          </button>
-          <button className="secondary" onClick={loadFromBrowser}>
-            Load
-          </button>
-          <button className="secondary" onClick={exportScenarios}>
-            Export JSON
-          </button>
-          <button className="secondary" onClick={exportResultsCsv}>
-            Export results CSV
-          </button>
-          <button className="secondary" onClick={() => importInputRef.current?.click()}>
-            Import JSON
-          </button>
-          <input
-            ref={importInputRef}
-            className="hidden-file-input"
-            type="file"
-            accept="application/json,.json"
-            onChange={importScenarios}
-          />
         </div>
       </header>
 
-      <main className="dashboard">
-        <aside className="sidebar">
-          <section className="card">
-            <div className="section-head">
-              <h2>Active scenario</h2>
-              <p className="muted">You are editing Scenario {activeScenario}.</p>
-            </div>
-
-            <div className="scenario-tabs">
-              <button
-                className={activeScenario === "A" ? "active" : ""}
-                onClick={() => setActiveScenario("A")}
-              >
-                Scenario A
+      {/* Global Presets & System Drawer */}
+      {showSettingsDrawer && (
+        <div className="system-drawer">
+          <div className="drawer-col">
+            <div className="drawer-label">Presets (Scenario {activeScenario})</div>
+            <div className="preset-bar">
+              <button type="button" onClick={() => applyPolicyPreset("balanced")}>
+                Balanced
               </button>
-              <button
-                className={activeScenario === "B" ? "active" : ""}
-                onClick={() => setActiveScenario("B")}
-              >
-                Scenario B
+              <button type="button" onClick={() => applyPolicyPreset("freeTrade")}>
+                Free Trade
+              </button>
+              <button type="button" onClick={() => applyPolicyPreset("protectionist")}>
+                Protectionist
+              </button>
+              <button type="button" onClick={() => applyPolicyPreset("austerity")}>
+                Austerity
+              </button>
+              <button type="button" onClick={() => applyPolicyPreset("stimulus")}>
+                Stimulus
+              </button>
+              <button type="button" onClick={() => applyPolicyPreset("crisis")}>
+                Crisis Test
               </button>
             </div>
-          </section>
+          </div>
 
-          <section className="card">
-            <div className="section-head">
-              <h2>World settings</h2>
-              <p className="muted">Shared rules and event settings.</p>
-            </div>
-
-            <NumberControl
-              label="Steps"
-              value={activeConfig.steps}
-              min={1}
-              max={200}
-              step={1}
-              onChange={(value) => updateActiveWorldNumberField("steps", value)}
-            />
-
-            <NumberControl
-              label="Base tax rate"
-              value={activeConfig.taxRate}
-              min={0}
-              max={1}
-              step={0.01}
-              onChange={(value) => updateActiveWorldNumberField("taxRate", value)}
-            />
-
-            <NumberControl
-              label="Trade friction"
-              value={activeConfig.tradeFriction}
-              min={0}
-              max={0.4}
-              step={0.01}
-              onChange={(value) => updateActiveWorldNumberField("tradeFriction", value)}
-            />
-
-            <div className="divider" />
-
-            <label className="toggle toggle-block">
-              <input
-                type="checkbox"
-                checked={activeConfig.enableEvents}
-                onChange={(e) => updateActiveWorldToggle("enableEvents", e.target.checked)}
+          <div className="drawer-col">
+            <div className="drawer-label">Simulation Parameters</div>
+            <div className="drawer-settings-grid">
+              <NumberControl
+                label="Simulation Steps"
+                value={activeConfig.steps}
+                min={1}
+                max={200}
+                step={1}
+                onChange={(v) => updateActiveWorldNumberField("steps", v)}
               />
-              Enable events
-            </label>
-
-            <NumberControl
-              label="Event chance"
-              value={activeConfig.eventChance}
-              min={0}
-              max={0.5}
-              step={0.01}
-              onChange={(value) => updateActiveWorldNumberField("eventChance", value)}
-            />
-
-            <NumberControl
-              label="Seed"
-              value={activeConfig.seed}
-              min={1}
-              max={9999999}
-              step={1}
-              onChange={(value) => updateActiveWorldNumberField("seed", value)}
-            />
-
-            <NumberControl
-              label="Migration sensitivity"
-              value={activeConfig.migrationSensitivity}
-              min={0}
-              max={2}
-              step={0.05}
-              onChange={(value) => updateActiveWorldNumberField("migrationSensitivity", value)}
-            />
-
-            <NumberControl
-              label="Interest rate"
-              value={activeConfig.interestRate}
-              min={0}
-              max={0.1}
-              step={0.005}
-              onChange={(value) => updateActiveWorldNumberField("interestRate", value)}
-            />
-
-            <NumberControl
-              label="Price flexibility"
-              value={activeConfig.priceFlexibility}
-              min={0.2}
-              max={2}
-              step={0.05}
-              onChange={(value) => updateActiveWorldNumberField("priceFlexibility", value)}
-            />
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Policy presets</h2>
-              <p className="muted">Apply quick world strategies to Scenario {activeScenario}.</p>
-            </div>
-
-            <div className="preset-grid">
-              <button onClick={() => applyPolicyPreset("balanced")}>Balanced</button>
-              <button onClick={() => applyPolicyPreset("freeTrade")}>Free trade</button>
-              <button onClick={() => applyPolicyPreset("protectionist")}>Protectionist</button>
-              <button onClick={() => applyPolicyPreset("austerity")}>Austerity</button>
-              <button onClick={() => applyPolicyPreset("stimulus")}>Stimulus</button>
-              <button onClick={() => applyPolicyPreset("crisis")}>Crisis test</button>
-            </div>
-            {saveStatus && <p className="save-status">{saveStatus}</p>}
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Countries</h2>
-              <p className="muted">Select one to edit its economy.</p>
-            </div>
-
-            <label className="country-search">
-              <span className="muted">Search</span>
-              <input
-                type="text"
-                value={countrySearch}
-                placeholder="Filter countries"
-                onChange={(e) => setCountrySearch(e.target.value)}
+              <NumberControl
+                label="Base Tax Rate"
+                value={activeConfig.taxRate}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => updateActiveWorldNumberField("taxRate", v)}
               />
-            </label>
-
-            <div className="inline-actions">
-              <button onClick={addCountry}>Add country</button>
-              <button className="secondary" onClick={duplicateSelectedCountry}>
-                Duplicate
-              </button>
-              <button className="secondary" onClick={removeSelectedCountry}>
-                Remove
+              <NumberControl
+                label="Trade Friction"
+                value={activeConfig.tradeFriction}
+                min={0}
+                max={0.4}
+                step={0.01}
+                onChange={(v) => updateActiveWorldNumberField("tradeFriction", v)}
+              />
+              <NumberControl
+                label="Event Probability"
+                value={activeConfig.eventChance}
+                min={0}
+                max={0.5}
+                step={0.01}
+                onChange={(v) => updateActiveWorldNumberField("eventChance", v)}
+              />
+              <NumberControl
+                label="Migration Sensitivity"
+                value={activeConfig.migrationSensitivity}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(v) => updateActiveWorldNumberField("migrationSensitivity", v)}
+              />
+              <NumberControl
+                label="Price Flexibility"
+                value={activeConfig.priceFlexibility}
+                min={0.2}
+                max={2}
+                step={0.05}
+                onChange={(v) => updateActiveWorldNumberField("priceFlexibility", v)}
+              />
+            </div>
+            <div className="drawer-toggle-row">
+              <label className="checkbox-toggle">
+                <input
+                  type="checkbox"
+                  checked={activeConfig.enableEvents}
+                  onChange={(e) => updateActiveWorldToggle("enableEvents", e.target.checked)}
+                />
+                <span>Enable Events</span>
+              </label>
+              <button
+                type="button"
+                className="btn-subtle"
+                onClick={randomizeActiveSeed}
+              >
+                Randomize Seed
               </button>
             </div>
+          </div>
 
-            <div className="country-roster">
-              {visibleCountries.length > 0 ? (
-                visibleCountries.map((country) => {
-                  const runtimeStatus = countryStatusById.get(country.id) ?? "active";
-                  return (
-                    <button
-                      key={country.id}
-                      className={`country-chip ${
-                        effectiveSelectedCountryId === country.id ? "active" : ""
-                      }`}
-                      onClick={() => updateSelectedCountryId(activeScenario, country.id)}
-                    >
-                      <strong>{country.name}</strong>
-                      <span>{country.population.toLocaleString()} people</span>
-                      <span className={`status-inline ${runtimeStatus}`}>{runtimeStatus}</span>
-                    </button>
-                  );
-                })
-              ) : (
-                <p className="muted">No countries match that search.</p>
+          <div className="drawer-col">
+            <div className="drawer-label">Data Management</div>
+            <div className="drawer-actions">
+              <button type="button" className="btn-subtle" onClick={saveToBrowser}>
+                Save to Browser
+              </button>
+              <button type="button" className="btn-subtle" onClick={loadFromBrowser}>
+                Load from Browser
+              </button>
+              <button type="button" className="btn-subtle" onClick={exportScenarios}>
+                Export JSON
+              </button>
+              <button type="button" className="btn-subtle" onClick={exportResultsCsv}>
+                Export CSV
+              </button>
+              <button
+                type="button"
+                className="btn-subtle"
+                onClick={() => importInputRef.current?.click()}
+              >
+                Import JSON
+              </button>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: "none" }}
+                onChange={importScenarios}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save / Notification Toast */}
+      {saveStatus && <div className="status-toast">{saveStatus}</div>}
+
+      {/* Global Telemetry Ribbon */}
+      <GlobalTelemetry
+        currentStep={boundedStep}
+        totalSteps={totalSteps}
+        stepRecord={currentStepRecord}
+        activeStatus={activeStatus}
+      />
+
+      {/* Main Workspace Body */}
+      <main className="sim-workspace">
+        {/* VIEW 1: World (Core Triad: Network + Timeline + Selected Country) */}
+        {viewMode === "world" && (
+          <div className="world-view-grid">
+            {/* Left Column: Network Simulation & Timeline Bar */}
+            <div className="sim-primary-col">
+              <WorldNetworkView
+                countries={activeConfig.initialState.countries}
+                stepRecord={currentStepRecord}
+                selectedCountryId={selectedCountry?.id ?? ""}
+                onSelectCountry={updateSelectedCountryId}
+              />
+
+              <TimelineBar
+                currentStep={boundedStep}
+                totalSteps={totalSteps}
+                isPlaying={isPlaying}
+                onTogglePlay={() => setIsPlaying(!isPlaying)}
+                onStepChange={(step) => setCurrentStep(step)}
+                onStepDelta={(delta) =>
+                  setCurrentStep((prev) => Math.max(1, Math.min(totalSteps, prev + delta)))
+                }
+                eventsByStep={eventsByStep}
+              />
+
+              <div className="step-summary-strip">
+                <div className="step-summary-head">
+                  <span className="summary-title">Trade Routes</span>
+                  <span className="summary-subtitle">Step {boundedStep}</span>
+                </div>
+                {currentStepRecord && currentStepRecord.routes.length > 0 ? (
+                  <div className="step-routes-table-wrap">
+                    <table className="analytical-table mini">
+                      <thead>
+                        <tr>
+                          <th>From</th>
+                          <th>To</th>
+                          <th>Resource</th>
+                          <th>Delivered / Shipped</th>
+                          <th>Loss</th>
+                          <th>Tariff</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentStepRecord.routes.map((r, i) => (
+                          <tr key={i}>
+                            <td className="country-name-cell">{r.fromCountryName}</td>
+                            <td className="country-name-cell">{r.toCountryName}</td>
+                            <td>
+                              <span className={`res-pill ${r.resource}`}>
+                                {r.resource.toUpperCase()}
+                              </span>
+                            </td>
+                            <td className="mono-cell">
+                              {r.delivered.toFixed(1)} / {r.shipped.toFixed(1)}
+                            </td>
+                            <td className="mono-cell">
+                              {((1 - r.routeEfficiency) * 100).toFixed(0)}%
+                            </td>
+                            <td className="mono-cell">{(r.tariff * 100).toFixed(0)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="empty-routes-note">
+                    No shipments active at Step {boundedStep}.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right Column: Selected Country Panel */}
+            <div className="sim-secondary-col">
+              {selectedCountry && (
+                <CountryPanel
+                  country={selectedCountry}
+                  allCountries={activeConfig.initialState.countries}
+                  currentRecord={selectedCountryStepRecord}
+                  onNameChange={updateActiveName}
+                  onFieldChange={updateActiveCountryField}
+                  onPolicyChange={updateActivePolicyField}
+                  onTradePolicyChange={updateActiveTradePolicyField}
+                  onResourceChange={updateActiveResource}
+                  onTogglePreferredPartner={togglePreferredPartner}
+                  onLaborParticipationChange={updateActiveLaborParticipation}
+                  onLaborAllocationChange={updateActiveLaborAllocation}
+                  onAIPolicyChange={updateActiveAIPolicy}
+                  onAddCountry={addCountry}
+                  onDuplicateCountry={duplicateSelectedCountry}
+                  onRemoveCountry={removeSelectedCountry}
+                  canRemove={activeConfig.initialState.countries.length > 1}
+                  initialTab={initialParams.tab}
+                />
               )}
             </div>
-          </section>
-        </aside>
+          </div>
+        )}
 
-        <section className="content">
-          {selectedCountry && (
-            <CountryEditor
-              country={selectedCountry}
-              countries={activeConfig.initialState.countries}
-              runtimeStatus={selectedRuntimeStatus}
-              onNameChange={updateActiveName}
-              onFieldChange={updateActiveCountryField}
-              onPolicyChange={updateActivePolicyField}
-              onTradePolicyChange={updateActiveTradePolicyField}
-              onResourceChange={updateActiveResource}
-              onTogglePreferredPartner={togglePreferredPartner}
-              onLaborParticipationChange={updateActiveLaborParticipation}
-              onLaborAllocationChange={updateActiveLaborAllocation}
-              onAIPolicyChange={updateActiveAIPolicy}
-            />
-          )}
+        {/* VIEW 2: Trends (Economic Trends & Event Log) */}
+        {viewMode === "trends" && (
+          <TrendsView
+            result={activeResult}
+            currentStep={boundedStep}
+            onJumpToStep={(step) => {
+              setCurrentStep(step);
+              setViewMode("world");
+            }}
+            policySuggestions={policySuggestions}
+          />
+        )}
 
-          <section className="card">
-            <div className="section-head">
-              <h2>Overview</h2>
-              <p className="muted">High-level health of the active scenario.</p>
-            </div>
-
-            <div className="summary-grid global-summary-grid">
-              <div className="card stat-card nested">
-                <span className="muted">World population</span>
-                <strong>{activeSummary ? Math.round(activeSummary.population).toLocaleString() : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Average happiness</span>
-                <strong>{activeSummary ? activeSummary.happiness.toFixed(1) : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">World wealth</span>
-                <strong>{activeSummary ? money(activeSummary.wealth) : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Total debt</span>
-                <strong>{activeSummary ? money(activeSummary.debt) : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Average inflation</span>
-                <strong>{activeSummary ? pct(activeSummary.averageInflation) : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Trade volume</span>
-                <strong>{activeSummary ? activeSummary.tradeVolume.toFixed(1) : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Collapsed countries</span>
-                <strong>{activeSummary ? activeSummary.collapsedCountries.toString() : "—"}</strong>
-              </div>
-              <div className="card stat-card nested">
-                <span className="muted">Events</span>
-                <strong>{activeSummary ? activeSummary.eventCount.toString() : "—"}</strong>
-              </div>
-            </div>
-
-            <div className="insight-grid">
-              {activeSummaryCards.map((card) => (
-                <div className="card nested insight-card" key={card.label}>
-                  <span className="muted">{card.label}</span>
-                  <strong>{card.value}</strong>
-                  <p>{card.detail}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Insights</h2>
-              <p className="muted">Auto-generated explanations from the latest run.</p>
-            </div>
-
-            {recentInsights.length > 0 ? (
-              <div className="insight-feed">
-                {recentInsights.map((insight, index) => (
-                  <div
-                    key={`${insight.step}-${insight.title}-${index}`}
-                    className={`insight-item ${insight.severity}`}
-                  >
-                    <strong>
-                      {insight.countryName ? `${insight.countryName}: ` : ""}
-                      {insight.title}
-                    </strong>
-                    <p>{insight.message}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">No insights yet. Run the simulation to generate them.</p>
-            )}
-          </section>
-
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Policy advisor</h2>
-              <p className="muted">Actionable recommendations based on the active scenario's final state.</p>
-            </div>
-
-            <div className="advisor-list">
-              {policySuggestions.map((suggestion) => (
-                <div className="advisor-item" key={suggestion}>{suggestion}</div>
-              ))}
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Scenario comparison</h2>
-              <p className="muted">
-                Side-by-side outcomes for both worlds.
-                {comparisonSummary
-                  ? " Use the shared metric charts and delta table to spot differences quickly."
-                  : ""}
-              </p>
-            </div>
-
-            <div className="comparison-grid">
-              <div className="card nested scenario-panel">
-                <div className="scenario-panel-head">
-                  <h3>Scenario A</h3>
-                  <button className="secondary" onClick={() => setActiveScenario("A")}>
-                    Edit
-                  </button>
-                </div>
-                <div className="comparison-summary-mini">
-                  <span>Population: {summaryA ? Math.round(summaryA.population).toLocaleString() : "—"}</span>
-                  <span>Happiness: {summaryA ? summaryA.happiness.toFixed(1) : "—"}</span>
-                  <span>Wealth: {summaryA ? money(summaryA.wealth) : "—"}</span>
-                  <span>Debt: {summaryA ? money(summaryA.debt) : "—"}</span>
-                </div>
-                <WorldTrendChart result={results.A} metric={metric} />
-              </div>
-
-              <div className="card nested scenario-panel">
-                <div className="scenario-panel-head">
-                  <h3>Scenario B</h3>
-                  <button className="secondary" onClick={() => setActiveScenario("B")}>
-                    Edit
-                  </button>
-                </div>
-                <div className="comparison-summary-mini">
-                  <span>Population: {summaryB ? Math.round(summaryB.population).toLocaleString() : "—"}</span>
-                  <span>Happiness: {summaryB ? summaryB.happiness.toFixed(1) : "—"}</span>
-                  <span>Wealth: {summaryB ? money(summaryB.wealth) : "—"}</span>
-                  <span>Debt: {summaryB ? money(summaryB.debt) : "—"}</span>
-                </div>
-                <WorldTrendChart result={results.B} metric={metric} />
-              </div>
-            </div>
-
-            <div className="metric-tabs">
-              <button
-                className={metric === "population" ? "active" : ""}
-                onClick={() => setMetric("population")}
-              >
-                Population
-              </button>
-              <button
-                className={metric === "happiness" ? "active" : ""}
-                onClick={() => setMetric("happiness")}
-              >
-                Happiness
-              </button>
-              <button
-                className={metric === "wealth" ? "active" : ""}
-                onClick={() => setMetric("wealth")}
-              >
-                Wealth
-              </button>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Side-by-side summary</h2>
-              <p className="muted">The delta column shows Scenario B minus Scenario A.</p>
-            </div>
-
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Metric</th>
-                    <th>Scenario A</th>
-                    <th>Scenario B</th>
-                    <th>Delta (B - A)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {comparisonRows.map((row) => {
-                    const delta = row.b - row.a;
-                    return (
-                      <tr key={row.label}>
-                        <td>{row.label}</td>
-                        <td>{row.format(row.a)}</td>
-                        <td>{row.format(row.b)}</td>
-                        <td className={deltaClass(delta)}>{signedNumber(delta, row.format)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="comparison-note">
-              Lower values are usually better for debt, inflation, and warnings. Higher values are usually better for wealth,
-              happiness, population, infrastructure, sufficiency, and trade volume.
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Country-by-country comparison</h2>
-              <p className="muted">Matching countries are compared across both worlds.</p>
-            </div>
-
-            {countryComparisonRows.length > 0 ? (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Country</th>
-                      <th>Wealth A</th>
-                      <th>Wealth B</th>
-                      <th>Δ Wealth</th>
-                      <th>Happiness A</th>
-                      <th>Happiness B</th>
-                      <th>Δ Happiness</th>
-                      <th>Debt A</th>
-                      <th>Debt B</th>
-                      <th>Δ Debt</th>
-                      <th>Inflation A</th>
-                      <th>Inflation B</th>
-                      <th>Δ Inflation</th>
-                      <th>Sufficiency A</th>
-                      <th>Sufficiency B</th>
-                      <th>Δ Sufficiency</th>
-                      <th>Net trade A</th>
-                      <th>Net trade B</th>
-                      <th>Δ Net trade</th>
-                      <th>Migration A</th>
-                      <th>Migration B</th>
-                      <th>Δ Migration</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {countryComparisonRows.map((row) => {
-                      const deltaWealth = row.wealthB - row.wealthA;
-                      const deltaHappiness = row.happinessB - row.happinessA;
-                      const deltaDebt = row.debtB - row.debtA;
-                      const deltaInflation = row.inflationB - row.inflationA;
-                      const deltaSufficiency = row.sufficiencyB - row.sufficiencyA;
-                      const deltaNetTrade = row.netTradeB - row.netTradeA;
-                      const deltaMigration = row.migrationB - row.migrationA;
-
-                      return (
-                        <tr key={row.id}>
-                          <td>{row.name}</td>
-                          <td>{money(row.wealthA)}</td>
-                          <td>{money(row.wealthB)}</td>
-                          <td className={deltaClass(deltaWealth)}>{signedNumber(deltaWealth, money)}</td>
-                          <td>{row.happinessA.toFixed(1)}</td>
-                          <td>{row.happinessB.toFixed(1)}</td>
-                          <td className={deltaClass(deltaHappiness)}>
-                            {signedNumber(deltaHappiness, (n) => n.toFixed(1))}
-                          </td>
-                          <td>{money(row.debtA)}</td>
-                          <td>{money(row.debtB)}</td>
-                          <td className={deltaClass(deltaDebt)}>{signedNumber(deltaDebt, money)}</td>
-                          <td>{pct(row.inflationA)}</td>
-                          <td>{pct(row.inflationB)}</td>
-                          <td className={deltaClass(deltaInflation)}>{signedNumber(deltaInflation, pct)}</td>
-                          <td>{pct(row.sufficiencyA)}</td>
-                          <td>{pct(row.sufficiencyB)}</td>
-                          <td className={deltaClass(deltaSufficiency)}>{signedNumber(deltaSufficiency, pct)}</td>
-                          <td>{money(row.netTradeA)}</td>
-                          <td>{money(row.netTradeB)}</td>
-                          <td className={deltaClass(deltaNetTrade)}>{signedNumber(deltaNetTrade, money)}</td>
-                          <td>{row.migrationA.toLocaleString()}</td>
-                          <td>{row.migrationB.toLocaleString()}</td>
-                          <td className={deltaClass(deltaMigration)}>
-                            {signedNumber(deltaMigration, (n) => Math.round(n).toLocaleString())}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="muted">Copy one scenario into the other to compare matching countries.</p>
-            )}
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Latest events</h2>
-              <p className="muted">Recent shocks from the active world.</p>
-            </div>
-
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Step</th>
-                    <th>Type</th>
-                    <th>Countries</th>
-                    <th>Description</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentEvents.length > 0 ? (
-                    recentEvents.map((event, index) => (
-                      <tr key={`${event.step}-${event.type}-${index}`}>
-                        <td>{event.step}</td>
-                        <td>{formatEventType(event.type)}</td>
-                        <td>{event.countryNames.length > 0 ? event.countryNames.join(" / ") : "Global"}</td>
-                        <td>{event.description}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={4} className="muted">
-                        No recent events in this scenario.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="section-head">
-              <h2>Active scenario trade routes</h2>
-              <p className="muted">Largest shipments in the last step of the active scenario.</p>
-            </div>
-
-            {topRoutes.length > 0 ? (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>From</th>
-                      <th>To</th>
-                      <th>Resource</th>
-                      <th>Shipped</th>
-                      <th>Delivered</th>
-                      <th>Efficiency</th>
-                      <th>Tariff</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {topRoutes.map((route, index) => (
-                      <tr key={`${route.fromCountryId}-${route.toCountryId}-${route.resource}-${index}`}>
-                        <td>{route.fromCountryName}</td>
-                        <td>{route.toCountryName}</td>
-                        <td>{route.resource.toUpperCase()}</td>
-                        <td>{route.shipped.toFixed(1)}</td>
-                        <td>{route.delivered.toFixed(1)}</td>
-                        <td>{pct(route.routeEfficiency)}</td>
-                        <td>{pct(route.tariff)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p className="muted">Run the active scenario to see routes.</p>
-            )}
-          </section>
-        </section>
+        {/* VIEW 3: Compare (A/B Scenario Evaluation) */}
+        {viewMode === "compare" && (
+          <CompareView
+            resultA={results.A}
+            resultB={results.B}
+            comparisonRows={comparisonRows}
+            countryComparisonRows={countryComparisonRows}
+            onSelectScenario={(s) => setActiveScenario(s)}
+            onCopyToOther={() => copyScenario(activeScenario, otherScenario)}
+            onSwapScenarios={swapScenarios}
+          />
+        )}
       </main>
     </div>
   );

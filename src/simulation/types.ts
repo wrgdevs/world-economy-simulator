@@ -37,12 +37,13 @@ export interface CountryPolicy {
   importSubsidyRate: number;
 }
 
-export interface AIPolicy {
+export interface AutomatedPolicy {
   enabled: boolean;
   responsiveness: number;
   targetHappiness: number;
   targetDebtRatio: number;
 }
+export type AIPolicy = AutomatedPolicy;
 
 export interface CountryState {
   id: string;
